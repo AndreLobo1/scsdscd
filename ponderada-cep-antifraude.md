@@ -16,10 +16,12 @@ Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atual
 
 #### Critério de classificação usado na tabela de eventos
 
-- **Simples**: fato atômico, observado direto na fonte, existe sozinho sem precisar correlacionar com nenhum outro evento.
-- **Complexo**: evento derivado, só existe como resultado de aplicar um operador de correlação (conjunção, janela deslizante, contagem/sequência) sobre 2 ou mais eventos simples.
-- **Negócio**: representa um fato do processo de compra/pagamento, relevante pro domínio em si, independente de qual tecnologia processa ele.
-- **Técnico**: se origina de um componente de infraestrutura/plataforma (fingerprinting, gateway, broker), e só entra nesta modelagem se passar num teste adicional: precisa alimentar uma decisão do motor de fraude, virando input de um evento complexo ou mudando uma ação do sistema. Evento técnico que não afeta nenhuma decisão de negócio (ex: métrica genérica de saúde do broker) fica fora do escopo, porque nesse caso é operação da plataforma Kafka, não evento do domínio de antifraude.
+| Classificação | Definição | Teste de inclusão |
+|---|---|---|
+| Simples | Fato atômico, observado direto na fonte | Existe sozinho, sem precisar correlacionar com nenhum outro evento |
+| Complexo | Evento derivado | Só existe como resultado de aplicar um operador de correlação (conjunção, janela deslizante, contagem/sequência) sobre 2 ou mais eventos simples |
+| Negócio | Representa um fato do processo de compra/pagamento | Relevante pro domínio em si, independente de qual tecnologia processa ele |
+| Técnico | Se origina de um componente de infraestrutura/plataforma (fingerprinting, gateway, broker) | Só entra na modelagem se alimentar uma decisão do motor de fraude, virando input de um evento complexo ou mudando uma ação do sistema. Evento técnico que não afeta nenhuma decisão de negócio (ex: métrica genérica de saúde do broker) fica fora do escopo, é operação da plataforma Kafka, não evento do domínio de antifraude |
 
 ## 1. Tabela de eventos
 
@@ -54,7 +56,7 @@ Seis diagramas cobrem os fluxos: dois estáticos (estrutura e arquitetura), e qu
 
 #### Diagrama 1: diagrama de classes, estrutura de domínio
 
-Modela as entidades do pedido e a hierarquia de eventos: evento simples e complexo herdam de uma classe abstrata comum, o evento complexo agrega os eventos simples que correlaciona através de uma regra, e dispara uma ação que implementa uma interface comum. `CobrancaCentavos`, `ScanFacial`, `NegarPedido` e `BloquearConta` aparecem sem atributo/método próprio de propósito: são implementações do padrão Strategy, sem estado, que só sobrescrevem `executar()` da interface `AcaoAntifraude` (por isso o compartimento vazio na classe, não é diagrama incompleto).
+Modela as entidades do pedido e a hierarquia de eventos: evento simples e complexo herdam de uma classe abstrata comum, o evento complexo agrega os eventos simples que correlaciona através de uma regra, e dispara uma ação que implementa uma interface comum. `CobrancaCentavos`, `ScanFacial`, `NegarPedido` e `BloquearConta` aparecem sem atributo/método próprio de propósito: são implementações do padrão Strategy, sem estado, que só sobrescrevem `executar()` da interface `AcaoAntifraude`.
 
 ```mermaid
 classDiagram
@@ -188,13 +190,11 @@ stateDiagram-v2
     PendenteCentavos --> Negado : E16
     PendenteBiometria --> Aprovado : E08 ok
     PendenteBiometria --> Negado : E17
-    RevisaoManual --> Negado : confirmada
-    RevisaoManual --> Aprovado : falso positivo
+    RevisaoManual --> Negado : fraude
+    RevisaoManual --> Aprovado : engano
     Aprovado --> [*]
     Negado --> [*]
 ```
-
-Se ainda cruzar rótulo no seu renderizador, é limitação conhecida do auto-layout do Mermaid pra estado com múltiplos caminhos convergindo nos 2 estados finais (`Aprovado`/`Negado`), não erro de modelagem. Alternativa mais robusta pra esse tipo de diagrama é PlantUML (motor de layout mais maduro pra state diagram), mas exige renderizador próprio, não abre no mermaid.live.
 
 #### Diagrama 4: diagrama de sequência, combo suspeito até decisão por histórico (cenário C3)
 
@@ -286,6 +286,15 @@ sequenceDiagram
 
 ## 3. Cenários de negócio
 
+#### Critério usado pra definir um cenário
+
+| Critério | O que exige |
+|---|---|
+| Ancorado num evento real da tabela 1 | O evento de entrada é um ID específico ([E01](#e01) a [E18](#e18)) ou a ausência explícita de um evento complexo, nunca uma situação hipotética solta |
+| Ação mapeada numa classe concreta | A ação disparada corresponde a uma das implementações de `AcaoAntifraude` do diagrama de classes (`CobrancaCentavos`, `ScanFacial`, `NegarPedido`, `BloquearConta`), não uma descrição vaga nova |
+| Ganho sobre a transação, não sobre detecção em geral | O benefício declarado precisa ser sobre a transação em si (menos fricção, decisão mais rápida, bloqueio antes da perda), e não um argumento genérico de "detecta mais fraude" |
+| Mecanismo distinto dos outros cenários | Cada cenário usa um operador de correlação diferente da tabela 1 (conjunção, janela deslizante, contagem), pra não virar o mesmo padrão com o evento trocado |
+
 | ID | Cenário | Evento(s) de entrada | Ação disparada | Ganho de eficiência |
 |---|---|---|---|---|
 | <a id="c1"></a>C1 | Cobrança de centavos em vez de bloqueio direto | 1 sinal de risco isolado (ex: [E03](#e03), sem outros sinais na janela) | [E05](#e05) | Evita negar venda legítima por 1 sinal fraco, resolve a ambiguidade com fricção mínima |
@@ -293,4 +302,3 @@ sequenceDiagram
 | <a id="c3"></a>C3 | Negação de combo suspeito com exceção por histórico do próprio cliente | [E13](#e13) correlacionado com histórico de compra do mesmo cliente | Negar pedido, ou liberar se o padrão já é recorrente pra esse cliente | Reduz falso positivo em cliente recorrente (ex: churrasco de família), mantendo o bloqueio pra cliente novo com o mesmo padrão |
 | <a id="c4"></a>C4 | Bloqueio preventivo por teste de cartão | [E15](#e15) | Bloquear conta | Detecção em tempo real corta a fraude na 3ª/4ª tentativa, antes do cartão testado ser usado numa compra de valor alto |
 | <a id="c5"></a>C5 | Escalonamento progressivo por confirmação inconsistente | [E06](#e06) repetido, virando [E16](#e16) | 1º erro: pedir nova confirmação. 2º erro ([E16](#e16)): negar ou exigir [E07](#e07) | Erro isolado de digitação não penaliza cliente legítimo, só o padrão repetido eleva a ação |
-| <a id="c6"></a>C6 | Bloqueio imediato de transação ligada a fraude em rede | [E18](#e18) | Negar o pedido atual, e adicionar as demais contas envolvidas a uma fila de revisão do time de risco | Corta a transação fraudulenta em andamento na hora (mesma ação de C3/C4, não uma revisão só em lote depois), e antecipa a próxima tentativa de fraude nas outras contas antes dela virar uma transação completa |
