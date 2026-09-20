@@ -12,15 +12,18 @@ Shopper é um mercado online: cliente compra pelo site ou app, sem contato prese
 
 Entendimento: eventos simples A e B acontecem, o motor de CEP os processa em tempo real e, ao encontrar um padrão entre eles, gera um evento complexo C, derivado dos dois primeiros. Isso dá ao sistema o poder de reagir à fraude "ao vivo", durante o checkout, em vez de descobrir o problema depois, numa análise em lote no fim do dia.
 
-Está correto, e cada peça desse entendimento aparece nos autoestudos:
-
-- **Vídeo introdutório sobre Kafka** ([youtube.com/watch?v=-RDyEFvnTXI](https://www.youtube.com/watch?v=-RDyEFvnTXI)): mostra a mecânica que viabiliza o "tempo real": producers publicam eventos em tópicos, tópicos são divididos em partições pra permitir paralelismo mantendo ordem por chave, consumers leem esse fluxo continuamente. É essa infraestrutura (event streaming) que faz A e B chegarem ao motor de CEP no instante em que acontecem, não em batch.
-- **Ebook da Confluent, "Designing Event-Driven Systems"** ([confluent.io/resources/ebook/designing-event-driven-systems](https://www.confluent.io/resources/ebook/designing-event-driven-systems/)): separa conceitos que eu misturava. Event Streaming é o fluxo contínuo de eventos sendo processado assim que ocorre, é onde o CEP vive. Event Sourcing é diferente: é guardar o histórico completo de mudanças de estado como sequência de eventos, serve mais pra auditoria/reconstrução de estado do que pra detecção de padrão em tempo real. Event-driven Architecture é o desenho geral, produtores e consumidores desacoplados se comunicando só por evento. CQRS separa o lado de escrita do lado de leitura, não é o mecanismo do CEP em si, mas aparece no mesmo ecossistema porque o modelo de leitura muitas vezes é atualizado a partir do mesmo stream de eventos.
-- **Artigo do ResearchGate sobre stream processing com Kafka** ([researchgate.net/publication/382933056](https://www.researchgate.net/publication/382933056_REAL-TIME_STREAM_PROCESSING_WITH_APACHE_KAFKA_DESIGN_PATTERNS_USE_CASES_AND_PERFORMANCE_EVALUATION)): reforça exatamente o caso de uso que essa ponderada modela, detecção de fraude em tempo real como um dos cenários clássicos de processamento de stream, junto com o padrão de correlacionar múltiplos eventos de entrada numa janela de tempo pra gerar uma decisão.
-
 Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atualizado) são o A e o B. O motor de CEP aplica uma regra de conjunção sobre os dois, escopados ao mesmo pedido, e gera [E13](#e13) (compra suspeita), que é o C. A reação (pedir verificação extra ou negar) acontece enquanto o pedido ainda está aberto, porque o processamento é sobre o stream, não sobre um relatório do dia seguinte.
 
+#### Critério de classificação usado na tabela de eventos
+
+- **Simples**: fato atômico, observado direto na fonte, existe sozinho sem precisar correlacionar com nenhum outro evento.
+- **Complexo**: evento derivado, só existe como resultado de aplicar um operador de correlação (conjunção, janela deslizante, contagem/sequência) sobre 2 ou mais eventos simples.
+- **Negócio**: representa um fato do processo de compra/pagamento, relevante pro domínio em si, independente de qual tecnologia processa ele.
+- **Técnico**: se origina de um componente de infraestrutura/plataforma (fingerprinting, gateway, broker), e só entra nesta modelagem se passar num teste adicional: precisa alimentar uma decisão do motor de fraude, virando input de um evento complexo ou mudando uma ação do sistema. Evento técnico que não afeta nenhuma decisão de negócio (ex: métrica genérica de saúde do broker) fica fora do escopo, porque nesse caso é operação da plataforma Kafka, não evento do domínio de antifraude.
+
 ## 1. Tabela de eventos
+
+Os 18 eventos abaixo foram levantados a partir do fluxo de checkout descrito no contexto e classificados segundo o critério acima. A coluna de justificativa técnica aplica esse critério caso a caso, e nos eventos técnicos aponta explicitamente qual decisão do sistema o evento alimenta.
 
 | ID | Evento | Descrição | Categoria | Tipo | Justificativa técnica |
 |---|---|---|---|---|---|
@@ -43,8 +46,6 @@ Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atual
 | <a id="e17"></a>E17 | Falha biométrica recorrente | 2 ou mais ocorrências de [E08](#e08) com no-match, na mesma sessão | Complexo | Negócio | Mesmo mecanismo de [E16](#e16), aplicado a outro evento simples de origem |
 | <a id="e18"></a>E18 | Dispositivo ou endereço compartilhado entre múltiplas contas | Mesmo fingerprint ou endereço aparece em pedidos de contas de cliente diferentes numa janela curta | Complexo | Negócio | Correlação cross-entity: não é escopada a um único `orderId`/cliente, mas a um recurso compartilhado entre streams de clientes distintos, padrão típico de detecção de fraude em anel |
 
-12 eventos simples (8 negócio, 4 técnico) e 6 complexos (todos negócio, por serem decisões derivadas).
-
 ## 2. Modelagem estática e dinâmica (UML)
 
 Seis diagramas cobrem os fluxos: dois estáticos (estrutura e arquitetura), e quatro dinâmicos (ciclo de vida do pedido e três sequências, uma por mecanismo de correlação distinto da tabela de eventos).
@@ -53,7 +54,7 @@ Seis diagramas cobrem os fluxos: dois estáticos (estrutura e arquitetura), e qu
 
 #### Diagrama 1: diagrama de classes, estrutura de domínio
 
-Modela as entidades do pedido e a hierarquia de eventos: evento simples e complexo herdam de uma classe abstrata comum, o evento complexo agrega os eventos simples que correlaciona através de uma regra, e dispara uma ação que implementa uma interface comum.
+Modela as entidades do pedido e a hierarquia de eventos: evento simples e complexo herdam de uma classe abstrata comum, o evento complexo agrega os eventos simples que correlaciona através de uma regra, e dispara uma ação que implementa uma interface comum. `CobrancaCentavos`, `ScanFacial`, `NegarPedido` e `BloquearConta` aparecem sem atributo/método próprio de propósito: são implementações do padrão Strategy, sem estado, que só sobrescrevem `executar()` da interface `AcaoAntifraude` (por isso o compartimento vazio na classe, não é diagrama incompleto).
 
 ```mermaid
 classDiagram
@@ -103,13 +104,13 @@ classDiagram
     class NegarPedido
     class BloquearConta
 
-    Pedido "1" --> "many" ItemPedido
+    Pedido "1" *-- "1..*" ItemPedido : composição
     ItemPedido --> Categoria
     Pedido --> Cliente
     EventoAntifraude <|-- EventoSimples
     EventoAntifraude <|-- EventoComplexo
     EventoComplexo --> RegraDeCorrelacao
-    EventoComplexo "1" --> "many" EventoSimples : correlaciona
+    EventoComplexo "1" o-- "1..*" EventoSimples : agregação, correlaciona
     EventoComplexo --> AcaoAntifraude : dispara
     AcaoAntifraude <|.. CobrancaCentavos
     AcaoAntifraude <|.. ScanFacial
@@ -175,22 +176,25 @@ Representa como o pedido transita entre estados conforme os eventos complexos ch
 
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> Criado
-    Criado --> EmAnalise : E04 pagamento
-    EmAnalise --> Aprovado : sem evento complexo
+    Criado --> EmAnalise : E04
+    EmAnalise --> Aprovado : sem complexo
     EmAnalise --> PendenteCentavos : C1
-    EmAnalise --> PendenteBiometria : C2, E14
-    EmAnalise --> Negado : C4, E15
-    EmAnalise --> RevisaoManual : C6, E18
-    PendenteCentavos --> Aprovado : E06 correto
-    PendenteCentavos --> Negado : C5, E16
-    PendenteBiometria --> Aprovado : E08 match
+    EmAnalise --> PendenteBiometria : C2/E14
+    EmAnalise --> Negado : C4/E15
+    EmAnalise --> RevisaoManual : C6/E18
+    PendenteCentavos --> Aprovado : E06 ok
+    PendenteCentavos --> Negado : E16
+    PendenteBiometria --> Aprovado : E08 ok
     PendenteBiometria --> Negado : E17
-    RevisaoManual --> Negado : fraude confirmada
+    RevisaoManual --> Negado : confirmada
     RevisaoManual --> Aprovado : falso positivo
     Aprovado --> [*]
     Negado --> [*]
 ```
+
+Se ainda cruzar rótulo no seu renderizador, é limitação conhecida do auto-layout do Mermaid pra estado com múltiplos caminhos convergindo nos 2 estados finais (`Aprovado`/`Negado`), não erro de modelagem. Alternativa mais robusta pra esse tipo de diagrama é PlantUML (motor de layout mais maduro pra state diagram), mas exige renderizador próprio, não abre no mermaid.live.
 
 #### Diagrama 4: diagrama de sequência, combo suspeito até decisão por histórico (cenário C3)
 
@@ -289,4 +293,4 @@ sequenceDiagram
 | <a id="c3"></a>C3 | Negação de combo suspeito com exceção por histórico do próprio cliente | [E13](#e13) correlacionado com histórico de compra do mesmo cliente | Negar pedido, ou liberar se o padrão já é recorrente pra esse cliente | Reduz falso positivo em cliente recorrente (ex: churrasco de família), mantendo o bloqueio pra cliente novo com o mesmo padrão |
 | <a id="c4"></a>C4 | Bloqueio preventivo por teste de cartão | [E15](#e15) | Bloquear conta | Detecção em tempo real corta a fraude na 3ª/4ª tentativa, antes do cartão testado ser usado numa compra de valor alto |
 | <a id="c5"></a>C5 | Escalonamento progressivo por confirmação inconsistente | [E06](#e06) repetido, virando [E16](#e16) | 1º erro: pedir nova confirmação. 2º erro ([E16](#e16)): negar ou exigir [E07](#e07) | Erro isolado de digitação não penaliza cliente legítimo, só o padrão repetido eleva a ação |
-| <a id="c6"></a>C6 | Detecção de fraude coordenada entre contas | [E18](#e18) | Flag das contas envolvidas pra revisão, ou bloqueio em lote | Correlação entre clientes diferentes (não só dentro de 1 pedido) pega fraude organizada que nenhuma regra por pedido isolado detectaria |
+| <a id="c6"></a>C6 | Bloqueio imediato de transação ligada a fraude em rede | [E18](#e18) | Negar o pedido atual, e adicionar as demais contas envolvidas a uma fila de revisão do time de risco | Corta a transação fraudulenta em andamento na hora (mesma ação de C3/C4, não uma revisão só em lote depois), e antecipa a próxima tentativa de fraude nas outras contas antes dela virar uma transação completa |
