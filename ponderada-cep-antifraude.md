@@ -8,7 +8,19 @@ Antifraude do checkout do site shopper.com.br
 
 Shopper é um mercado online: cliente compra pelo site ou app, sem contato presencial no momento da compra. Por não existir verificação humana no caixa, o antifraude é o sistema que decide, durante o checkout, se o pedido segue direto, passa por verificação extra, ou é barrado, cruzando sinais do pedido (itens, valor, dispositivo, endereço) pra separar cliente legítimo de fraude sem travar a operação com falso positivo.
 
-## Tabela de eventos
+### Conceito de CEP que entendi com base nos autoestudos
+
+Entendimento: eventos simples A e B acontecem, o motor de CEP os processa em tempo real e, ao encontrar um padrão entre eles, gera um evento complexo C, derivado dos dois primeiros. Isso dá ao sistema o poder de reagir à fraude "ao vivo", durante o checkout, em vez de descobrir o problema depois, numa análise em lote no fim do dia.
+
+Está correto, e cada peça desse entendimento aparece nos autoestudos:
+
+- **Vídeo introdutório sobre Kafka** ([youtube.com/watch?v=-RDyEFvnTXI](https://www.youtube.com/watch?v=-RDyEFvnTXI)): mostra a mecânica que viabiliza o "tempo real": producers publicam eventos em tópicos, tópicos são divididos em partições pra permitir paralelismo mantendo ordem por chave, consumers leem esse fluxo continuamente. É essa infraestrutura (event streaming) que faz A e B chegarem ao motor de CEP no instante em que acontecem, não em batch.
+- **Ebook da Confluent, "Designing Event-Driven Systems"** ([confluent.io/resources/ebook/designing-event-driven-systems](https://www.confluent.io/resources/ebook/designing-event-driven-systems/)): separa conceitos que eu misturava. Event Streaming é o fluxo contínuo de eventos sendo processado assim que ocorre, é onde o CEP vive. Event Sourcing é diferente: é guardar o histórico completo de mudanças de estado como sequência de eventos, serve mais pra auditoria/reconstrução de estado do que pra detecção de padrão em tempo real. Event-driven Architecture é o desenho geral, produtores e consumidores desacoplados se comunicando só por evento. CQRS separa o lado de escrita do lado de leitura, não é o mecanismo do CEP em si, mas aparece no mesmo ecossistema porque o modelo de leitura muitas vezes é atualizado a partir do mesmo stream de eventos.
+- **Artigo do ResearchGate sobre stream processing com Kafka** ([researchgate.net/publication/382933056](https://www.researchgate.net/publication/382933056_REAL-TIME_STREAM_PROCESSING_WITH_APACHE_KAFKA_DESIGN_PATTERNS_USE_CASES_AND_PERFORMANCE_EVALUATION)): reforça exatamente o caso de uso que essa ponderada modela, detecção de fraude em tempo real como um dos cenários clássicos de processamento de stream, junto com o padrão de correlacionar múltiplos eventos de entrada numa janela de tempo pra gerar uma decisão.
+
+Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atualizado) são o A e o B. O motor de CEP aplica uma regra de conjunção sobre os dois, escopados ao mesmo pedido, e gera [E13](#e13) (compra suspeita), que é o C. A reação (pedir verificação extra ou negar) acontece enquanto o pedido ainda está aberto, porque o processamento é sobre o stream, não sobre um relatório do dia seguinte.
+
+## 1. Tabela de eventos
 
 | ID | Evento | Descrição | Categoria | Tipo | Justificativa técnica |
 |---|---|---|---|---|---|
@@ -33,22 +45,13 @@ Shopper é um mercado online: cliente compra pelo site ou app, sem contato prese
 
 12 eventos simples (8 negócio, 4 técnico) e 6 complexos (todos negócio, por serem decisões derivadas).
 
-## Cenários de negócio
+## 2. Modelagem estática e dinâmica (UML)
 
-| ID | Cenário | Evento(s) de entrada | Ação disparada | Ganho de eficiência |
-|---|---|---|---|---|
-| <a id="c1"></a>C1 | Cobrança de centavos em vez de bloqueio direto | 1 sinal de risco isolado (ex: [E03](#e03), sem outros sinais na janela) | [E05](#e05) | Evita negar venda legítima por 1 sinal fraco, resolve a ambiguidade com fricção mínima |
-| <a id="c2"></a>C2 | Scan facial só com correlação multi-sinal | [E14](#e14) | [E07](#e07) | Biometria só é exigida quando 3 sinais convergem, reduz atrito no checkout da maioria dos pedidos, que não geram [E14](#e14) |
-| <a id="c3"></a>C3 | Negação de combo suspeito com exceção por histórico do próprio cliente | [E13](#e13) correlacionado com histórico de compra do mesmo cliente | Negar pedido, ou liberar se o padrão já é recorrente pra esse cliente | Reduz falso positivo em cliente recorrente (ex: churrasco de família), mantendo o bloqueio pra cliente novo com o mesmo padrão |
-| <a id="c4"></a>C4 | Bloqueio preventivo por teste de cartão | [E15](#e15) | Bloquear conta | Detecção em tempo real corta a fraude na 3ª/4ª tentativa, antes do cartão testado ser usado numa compra de valor alto |
-| <a id="c5"></a>C5 | Escalonamento progressivo por confirmação inconsistente | [E06](#e06) repetido, virando [E16](#e16) | 1º erro: pedir nova confirmação. 2º erro ([E16](#e16)): negar ou exigir [E07](#e07) | Erro isolado de digitação não penaliza cliente legítimo, só o padrão repetido eleva a ação |
-| <a id="c6"></a>C6 | Detecção de fraude coordenada entre contas | [E18](#e18) | Flag das contas envolvidas pra revisão, ou bloqueio em lote | Correlação entre clientes diferentes (não só dentro de 1 pedido) pega fraude organizada que nenhuma regra por pedido isolado detectaria |
+Seis diagramas cobrem os fluxos: dois estáticos (estrutura e arquitetura), e quatro dinâmicos (ciclo de vida do pedido e três sequências, uma por mecanismo de correlação distinto da tabela de eventos).
 
-## Diagramas UML
+### 2.1 Modelagem estática
 
-Seis diagramas cobrem os fluxos: dois estáticos (estrutura e arquitetura), um dinâmico de ciclo de vida, e três dinâmicos de sequência, um por mecanismo de correlação distinto da tabela de eventos.
-
-### 1. Diagrama de classes: estrutura de domínio
+#### Diagrama 1: diagrama de classes, estrutura de domínio
 
 Modela as entidades do pedido e a hierarquia de eventos: evento simples e complexo herdam de uma classe abstrata comum, o evento complexo agrega os eventos simples que correlaciona através de uma regra, e dispara uma ação que implementa uma interface comum.
 
@@ -114,7 +117,7 @@ classDiagram
     AcaoAntifraude <|.. BloquearConta
 ```
 
-### 2. Diagrama de componentes: arquitetura de streaming
+#### Diagrama 2: diagrama de componentes, arquitetura de streaming
 
 Cada serviço de origem é um producer que publica num tópico Kafka próprio por tipo de evento. Os tópicos são particionados por `orderId` (ou `clienteId`, pros eventos que correlacionam entre pedidos como [E18](#e18)), garantindo que os eventos do mesmo pedido cheguem em ordem ao mesmo consumer, requisito pra correlação de janela funcionar. O motor de CEP é um consumer group que aplica os operadores (conjunção, janela deslizante, contagem) e publica o evento complexo resultante num tópico de saída, consumido pelos serviços de decisão.
 
@@ -164,32 +167,32 @@ flowchart LR
     S1 --> C3
 ```
 
-### 3. Diagrama de estados: ciclo de vida do pedido
+### 2.2 Modelagem dinâmica
 
-Representa como o pedido transita entre estados conforme os eventos (simples e complexos) chegam. Cobre os seis cenários de negócio de forma genérica, já que todos resultam numa dessas transições.
+#### Diagrama 3: diagrama de estados, ciclo de vida do pedido
+
+Representa como o pedido transita entre estados conforme os eventos complexos chegam. Cobre os seis cenários de negócio de forma genérica, já que todos resultam numa dessas transições. Repetições que não mudam de estado (ex: 1º erro de confirmação, 1ª reprovação de biometria) ficam de fora do diagrama pra manter a leitura limpa: elas só saem do estado pendente quando o evento complexo correspondente ([E16](#e16) ou [E17](#e17)) é gerado.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Criado
-    Criado --> EmAnalise: E04 tentativa de pagamento
-    EmAnalise --> PendenteConfirmacaoCentavos: C1, sinal isolado
-    EmAnalise --> PendenteBiometria: C2, E14 possível conta comprometida
-    EmAnalise --> Negado: C4, E15 padrão de teste de cartão
-    EmAnalise --> Aprovado: sem evento complexo
-    EmAnalise --> RevisaoManual: C6, E18 fraude coordenada
-    PendenteConfirmacaoCentavos --> Aprovado: E06 confirmado corretamente
-    PendenteConfirmacaoCentavos --> PendenteConfirmacaoCentavos: E06 incorreto, 1a vez
-    PendenteConfirmacaoCentavos --> Negado: C5, E16 confirmacao inconsistente
-    PendenteBiometria --> Aprovado: E08 match
-    PendenteBiometria --> PendenteBiometria: E08 no-match, 1a vez
-    PendenteBiometria --> Negado: E17 falha biometrica recorrente
+    Criado --> EmAnalise : E04 pagamento
+    EmAnalise --> Aprovado : sem evento complexo
+    EmAnalise --> PendenteCentavos : C1
+    EmAnalise --> PendenteBiometria : C2, E14
+    EmAnalise --> Negado : C4, E15
+    EmAnalise --> RevisaoManual : C6, E18
+    PendenteCentavos --> Aprovado : E06 correto
+    PendenteCentavos --> Negado : C5, E16
+    PendenteBiometria --> Aprovado : E08 match
+    PendenteBiometria --> Negado : E17
+    RevisaoManual --> Negado : fraude confirmada
+    RevisaoManual --> Aprovado : falso positivo
     Aprovado --> [*]
     Negado --> [*]
-    RevisaoManual --> Negado: fraude confirmada
-    RevisaoManual --> Aprovado: falso positivo
 ```
 
-### 4. Diagrama de sequência: combo suspeito até decisão por histórico (cenário C3)
+#### Diagrama 4: diagrama de sequência, combo suspeito até decisão por histórico (cenário C3)
 
 Mostra como dois eventos simples do mesmo pedido são correlacionados pelo motor de CEP em [E13](#e13), e como a decisão final consulta o histórico do cliente antes de agir, evitando negar um cliente recorrente.
 
@@ -219,7 +222,7 @@ sequenceDiagram
     end
 ```
 
-### 5. Diagrama de sequência: correlação multi-sinal até scan facial (cenário C2)
+#### Diagrama 5: diagrama de sequência, correlação multi-sinal até scan facial (cenário C2)
 
 Mostra três eventos simples de origens diferentes (dispositivo, endereço, valor) sendo correlacionados numa janela deslizante, resultando em [E14](#e14) e na exigência de biometria antes de aprovar o pedido.
 
@@ -251,7 +254,7 @@ sequenceDiagram
     end
 ```
 
-### 6. Diagrama de sequência: padrão de teste de cartão até bloqueio (cenário C4)
+#### Diagrama 6: diagrama de sequência, padrão de teste de cartão até bloqueio (cenário C4)
 
 Mostra uma sequência de tentativas de pagamento pequenas e rápidas sendo contadas pelo motor de CEP até ultrapassar o limite, gerando [E15](#e15) e o bloqueio preventivo da conta.
 
@@ -276,3 +279,14 @@ sequenceDiagram
     Kafka->>Decisao: consome E15
     Decisao->>Checkout: bloqueia conta
 ```
+
+## 3. Cenários de negócio
+
+| ID | Cenário | Evento(s) de entrada | Ação disparada | Ganho de eficiência |
+|---|---|---|---|---|
+| <a id="c1"></a>C1 | Cobrança de centavos em vez de bloqueio direto | 1 sinal de risco isolado (ex: [E03](#e03), sem outros sinais na janela) | [E05](#e05) | Evita negar venda legítima por 1 sinal fraco, resolve a ambiguidade com fricção mínima |
+| <a id="c2"></a>C2 | Scan facial só com correlação multi-sinal | [E14](#e14) | [E07](#e07) | Biometria só é exigida quando 3 sinais convergem, reduz atrito no checkout da maioria dos pedidos, que não geram [E14](#e14) |
+| <a id="c3"></a>C3 | Negação de combo suspeito com exceção por histórico do próprio cliente | [E13](#e13) correlacionado com histórico de compra do mesmo cliente | Negar pedido, ou liberar se o padrão já é recorrente pra esse cliente | Reduz falso positivo em cliente recorrente (ex: churrasco de família), mantendo o bloqueio pra cliente novo com o mesmo padrão |
+| <a id="c4"></a>C4 | Bloqueio preventivo por teste de cartão | [E15](#e15) | Bloquear conta | Detecção em tempo real corta a fraude na 3ª/4ª tentativa, antes do cartão testado ser usado numa compra de valor alto |
+| <a id="c5"></a>C5 | Escalonamento progressivo por confirmação inconsistente | [E06](#e06) repetido, virando [E16](#e16) | 1º erro: pedir nova confirmação. 2º erro ([E16](#e16)): negar ou exigir [E07](#e07) | Erro isolado de digitação não penaliza cliente legítimo, só o padrão repetido eleva a ação |
+| <a id="c6"></a>C6 | Detecção de fraude coordenada entre contas | [E18](#e18) | Flag das contas envolvidas pra revisão, ou bloqueio em lote | Correlação entre clientes diferentes (não só dentro de 1 pedido) pega fraude organizada que nenhuma regra por pedido isolado detectaria |
