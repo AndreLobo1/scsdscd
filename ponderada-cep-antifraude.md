@@ -14,7 +14,7 @@ NSU (identificador de transação de adquirente/maquininha) não se aplica aqui:
 
 Entendimento: eventos simples A e B acontecem, o motor de CEP os processa em tempo real e, ao encontrar um padrão entre eles, gera um evento complexo C, derivado dos dois primeiros. Isso dá ao sistema o poder de reagir à fraude "ao vivo", durante o checkout, em vez de descobrir o problema depois, numa análise em lote no fim do dia.
 
-Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atualizado) são o A e o B. O motor de CEP aplica uma regra de conjunção sobre os dois, escopados ao mesmo pedido, enquanto o pedido está em `Criado`/`EmAnalise`, e gera [E13](#e13) (compra suspeita), que é o C. A reação (pedir verificação extra ou negar) acontece enquanto o pedido ainda está aberto, porque o processamento é sobre o stream, não sobre um relatório do dia seguinte.
+Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atualizado) são o A e o B. O motor de CEP aplica uma regra de conjunção sobre os dois, escopados ao mesmo pedido, enquanto o pedido está em `Criado`, e gera [E13](#e13) (compra suspeita), que é o C. A reação (pedir verificação extra ou negar) acontece enquanto o pedido ainda está aberto, porque o processamento é sobre o stream, não sobre um relatório do dia seguinte.
 
 #### Critério de classificação usado na tabela de eventos
 
@@ -27,7 +27,7 @@ Aplicando ao meu exemplo: [E01](#e01) (item de risco) e [E02](#e02) (valor atual
 
 ## 1. Tabela de eventos
 
-Os 19 eventos abaixo foram levantados a partir do fluxo de checkout descrito no contexto e classificados segundo o critério acima. Todo evento carrega `orderId` e `sessionId` (ver diagrama 1), as correlações usam a chave que faz sentido pro caso: `orderId` pra eventos do mesmo pedido, `sessionId` pra eventos que podem repetir antes do pedido fechar (confirmação, biometria), `clienteId` pra correlação entre pedidos do mesmo cliente, e o valor de fingerprint/endereço em si pra correlação entre clientes diferentes.
+Os 13 eventos abaixo foram levantados a partir do fluxo de checkout descrito no contexto e classificados segundo o critério acima. Os IDs 05, 11, 12, 16, 17, 18 e 20/21 foram cortados nesta versão por duplicarem mecanismo já demonstrado por outro evento, não terem cenário de negócio próprio, ou não terem nenhuma representação nos diagramas dinâmicos — numeração não é sequencial de propósito. Todo evento carrega `orderId` e `sessionId` (ver diagrama 1), as correlações usam a chave que faz sentido pro caso: `orderId` pra eventos do mesmo pedido, `sessionId` pra eventos que podem repetir antes do pedido fechar (confirmação, biometria), `clienteId` pra correlação entre pedidos do mesmo cliente.
 
 | ID | Evento | Descrição | Categoria | Tipo | Justificativa técnica |
 |---|---|---|---|---|---|
@@ -35,21 +35,19 @@ Os 19 eventos abaixo foram levantados a partir do fluxo de checkout descrito no 
 | <a id="e02"></a>E02 | Valor total do pedido atualizado | Soma do carrinho muda a cada item adicionado ou removido | Simples | Negócio | Estado observável do pedido no instante da emissão, sem agregação sobre janela de tempo |
 | <a id="e03"></a>E03 | Endereço de entrega diferente do histórico | Endereço do pedido não bate com os endereços recorrentes do cliente | Simples | Negócio | Comparação direta contra cadastro, sem janela temporal nem múltiplos eventos |
 | <a id="e04"></a>E04 | Tentativa de pagamento | Cliente inicia a cobrança do pedido | Simples | Negócio | Marco único do fluxo de checkout |
-| <a id="e05"></a>E05 | Cobrança de N centavos autorizada | Gateway autoriza microcobrança de verificação | Simples | Negócio | Resultado pontual de uma chamada ao gateway |
 | <a id="e06"></a>E06 | Cliente confirma ou erra valor cobrado | Cliente informa o valor que acha que foi cobrado | Simples | Negócio | Entrada única do usuário, sem dependência de eventos anteriores da mesma categoria |
 | <a id="e07"></a>E07 | Scan facial solicitado | Sistema pede verificação biométrica antes de concluir a compra | Simples | Negócio | Ação disparada, não correlação |
 | <a id="e08"></a>E08 | Resultado do scan facial (match ou no-match) | Retorno da verificação biométrica | Simples | Negócio | Resultado atômico de uma única chamada ao serviço de biometria |
 | <a id="e09"></a>E09 | Novo dispositivo detectado | Fingerprint do device diverge do histórico do cliente | Simples | Técnico | Produzido por componente de infraestrutura (device fingerprinting), não por ação de domínio, mas alimenta direto a correlação de [E14](#e14) |
 | <a id="e10"></a>E10 | Timeout ou falha na integração com gateway de pagamento | Erro de rede/infra na chamada ao gateway | Simples | Técnico | Usado pelo processador de [E15](#e15) pra excluir a tentativa do contador de fraude: falha do gateway não é a mesma coisa que fraudador testando cartão, sem essa exclusão o contador gera falso positivo |
-| <a id="e11"></a>E11 | Falha na chamada ao serviço de biometria | Serviço de scan facial fica indisponível ou retorna erro | Simples | Técnico | Usado pelo processador de [E17](#e17) pra não contar indisponibilidade do serviço como reprovação (no-match): sem essa exclusão, uma falha de infra viraria bloqueio de cliente legítimo |
-| <a id="e12"></a>E12 | Latência alta na chamada ao serviço de device fingerprinting | [E09](#e09) demora além do aceitável pra chegar | Simples | Técnico | Quando ultrapassa a janela de correlação de [E14](#e14), dispara [E19](#e19), formalizando o padrão de ausência de evento em vez de deixar o motor esperando indefinidamente |
-| <a id="e13"></a>E13 | Compra suspeita | Valor do pedido acima do limite e item de categoria de risco no mesmo pedido, enquanto o pedido está em `Criado`/`EmAnalise` | Complexo | Negócio | Conjunção (AND) de [E01](#e01) e [E02](#e02) escopada ao mesmo `orderId`. O que faz isso ser correlação de CEP e não um `if` disfarçado: [E01](#e01) e [E02](#e02) são publicados por partes distintas do checkout e não chegam em ordem garantida, o motor mantém um "partial match" (retém o primeiro evento até o par completar), igual pattern matching de motores CEP tipo Esper. Esse partial match tem TTL igual ao timeout de carrinho abandonado da loja: se o pedido nunca sai de `Criado` dentro desse prazo, o estado retido expira e é descartado, evitando acúmulo indefinido no state store |
+| <a id="e13"></a>E13 | Compra suspeita | Valor do pedido acima do limite e item de categoria de risco no mesmo pedido, enquanto o pedido está em `Criado`, antes da tentativa de pagamento (`E04`) — nunca em `EmAnalise`, que só existe depois de `E04` (ver diagrama 3) | Complexo | Negócio | Conjunção (AND) de [E01](#e01) e [E02](#e02) escopada ao mesmo `orderId`. O que faz isso ser correlação de CEP e não um `if` disfarçado: [E01](#e01) e [E02](#e02) são publicados por partes distintas do checkout e não chegam em ordem garantida, o motor mantém um "partial match" (retém o primeiro evento até o par completar), igual pattern matching de motores CEP tipo Esper. Esse partial match tem TTL igual ao timeout de carrinho abandonado da loja: se o pedido nunca sai de `Criado` dentro desse prazo, o estado retido expira e é descartado, evitando acúmulo indefinido no state store |
 | <a id="e14"></a>E14 | Possível conta comprometida | [E09](#e09), [E03](#e03) e valor alto ([E02](#e02)) dentro de uma janela curta (ex: 10 min), mesmo `clienteId` | Complexo | Negócio | Conjunção com janela deslizante sobre 3 eventos de origens distintas, a coincidência na janela é o que importa, não a ordem. [E03](#e03) e [E02](#e02) nascem chaveados por `orderId`, precisam de repartição pra `clienteId` antes do join (detalhe no diagrama 2), já que o mesmo cliente pode ter feito o pedido em sessões diferentes |
 | <a id="e15"></a>E15 | Padrão de teste de cartão | Múltiplas tentativas de [E04](#e04) falhando dentro do mesmo `orderId`, antes do pedido fechar, líquido de exclusões de [E10](#e10) | Complexo | Negócio | Contagem com threshold sobre repetição do mesmo tipo de evento, escopada ao mesmo pedido (mesma chave de [E04](#e04)/[E10](#e10), sem repartição necessária, ao contrário de [E14](#e14)) |
-| <a id="e16"></a>E16 | Confirmação inconsistente | 2 ou mais ocorrências de [E06](#e06) com erro, dentro do mesmo `sessionId` | Complexo | Negócio | Contagem com escopo de sessão (`sessionId`, atributo de `EventoAntifraude`, ver diagrama 1), evento simples repetido vira gatilho só ao ultrapassar o threshold |
-| <a id="e17"></a>E17 | Falha biométrica recorrente | 2 ou mais ocorrências de [E08](#e08) com no-match, dentro do mesmo `sessionId`, líquido de exclusões de [E11](#e11) | Complexo | Negócio | Mesmo mecanismo de [E16](#e16), aplicado a outro evento simples de origem |
-| <a id="e18"></a>E18 | Dispositivo ou endereço compartilhado entre múltiplas contas | Mesmo fingerprint ou endereço aparece em pedidos de `clienteId` diferentes numa janela curta | Complexo | Negócio | Correlação cross-entity: a chave de correlação é o valor do fingerprint/endereço em si, não `orderId` nem `clienteId`, por isso precisa de um índice compartilhado à parte, repartido por esse valor (detalhe no diagrama 2), não cabe em partição por pedido/cliente |
-| <a id="e19"></a>E19 | Decisão tomada sem sinal de dispositivo | Janela de correlação de [E14](#e14) expira sem [E09](#e09) chegar (efeito de [E12](#e12)) | Complexo | Negócio | Padrão de ausência: o evento complexo é gerado pela falta de um sinal dentro da janela, não pela presença dele. Precisa de um agendador de expiração de janela (ver `AgendadorDeJanela` no diagrama 1), não só de um operador que reage a chegada de evento |
+| <a id="e19"></a>E19 | Decisão tomada sem sinal de dispositivo | Janela de correlação de [E14](#e14) expira sem [E09](#e09) chegar, qualquer que seja o motivo (latência, falha ou serviço fora do ar) | Complexo | Negócio | Padrão de ausência de verdade: nasce só da expiração do `AgendadorDeJanela` monitorando a janela (ver diagrama 1), não depende de nenhum sinal do serviço de origem. Se o Device Fingerprinting travar de vez e não emitir nada, o timer expira do mesmo jeito e [E19](#e19) dispara, é isso que diferencia ausência real de "reação a um evento de erro" |
+
+### Cobertura das 4 combinações simples/complexo × técnico/negócio
+
+Das 4 combinações possíveis entre as duas dimensões da tabela acima, a modelagem cobre 3: simples-negócio ([E01](#e01)-[E08](#e08), exceto E09/E10), simples-técnico ([E09](#e09), [E10](#e10)), complexo-negócio ([E13](#e13), [E14](#e14), [E15](#e15), [E19](#e19)). Não existe complexo-técnico nesta versão, de propósito: os únicos eventos técnicos do domínio ([E09](#e09), [E10](#e10)) entram como **insumo** de correlação, nunca como **saída** dela — o motor de CEP aqui só produz evento complexo pra alimentar decisão de negócio (compra suspeita, conta comprometida, teste de cartão), nunca uma decisão de infraestrutura. Um evento complexo-técnico existiria, por exemplo, se o motor correlacionasse repetições de [E10](#e10) entre pedidos distintos na mesma janela pra gerar um alerta de instabilidade do gateway — isso é operação de plataforma (SRE/observabilidade), não decisão de antifraude, por isso fica fora do escopo do domínio escolhido (ver critério de tipo técnico na tabela acima: só entra se alimentar decisão de negócio).
 
 ## 2. Modelagem estática e dinâmica (UML)
 
@@ -59,7 +57,7 @@ Seis diagramas cobrem os fluxos: dois estáticos (estrutura e arquitetura) e qua
 
 #### Diagrama 1: diagrama de classes, estrutura de domínio
 
-Modela as entidades do pedido e a hierarquia de eventos. `EventoComplexo` tem duas formas: a comum, que agrega os eventos simples presentes que correlacionou (`eventosOrigem`, podendo ser vazio), e `EventoDeAusencia` (caso de [E19](#e19)), que nasce da falta de um evento esperado dentro de uma `JanelaDeCorrelacao`, monitorada por um `AgendadorDeJanela` que dispara a avaliação quando a janela expira sem o sinal chegar. `RegraDeCorrelacao` não carrega mais `janela: Duration` genérico na interface, porque nem toda implementação usa duração (`RegraConjuncao`, de [E13](#e13), é escopada por estado do pedido, não por tempo), cada implementação concreta declara o atributo que faz sentido pra ela.
+Modela as entidades do pedido e a hierarquia de eventos. `EventoComplexo` tem duas formas: a comum, que agrega os eventos simples presentes que correlacionou (via a associação de agregação com `EventoSimples`, cardinalidade `0..*` cobrindo o caso vazio), e `EventoDeAusencia` (caso de [E19](#e19)), que nasce da falta de um evento esperado dentro de uma `JanelaDeCorrelacao`, monitorada por um `AgendadorDeJanela` que dispara a avaliação quando a janela expira sem o sinal chegar. `RegraDeCorrelacao` não carrega mais `janela: Duration` genérico na interface, porque nem toda implementação usa duração (`RegraConjuncao`, de [E13](#e13), é escopada por estado do pedido, não por tempo), cada implementação concreta declara o atributo que faz sentido pra ela.
 
 ```mermaid
 classDiagram
@@ -68,6 +66,16 @@ classDiagram
         +clienteId: string
         +valorTotal: decimal
         +status: StatusPedido
+    }
+    class StatusPedido {
+        <<enumeration>>
+        Criado
+        EmAnalise
+        AvaliandoHistorico
+        PendenteCentavos
+        PendenteBiometria
+        Aprovado
+        Negado
     }
     class ItemPedido {
         +sku: string
@@ -82,14 +90,8 @@ classDiagram
     }
     class Cliente {
         +clienteId: string
-        +status: StatusCliente
         +enderecosHistorico: string[]
         +dispositivosHistorico: string[]
-    }
-    class StatusCliente {
-        <<enumeration>>
-        ATIVA
-        BLOQUEADA
     }
     class EventoAntifraude {
         <<abstract>>
@@ -97,11 +99,10 @@ classDiagram
         +timestamp: datetime
         +orderId: string
         +sessionId: string
+        +clienteId: string
     }
     class EventoSimples
-    class EventoComplexo {
-        +eventosOrigem: EventoSimples[]
-    }
+    class EventoComplexo
     class EventoDeAusencia {
         +eventoEsperado: string
     }
@@ -129,9 +130,6 @@ classDiagram
         +janela: Duration
         +threshold: int
     }
-    class RegraCrossEntity {
-        +janela: Duration
-    }
     class RegraAusencia {
         +janela: Duration
         +eventoEsperado: string
@@ -144,45 +142,45 @@ classDiagram
     class ScanFacial
     class NegarPedido
     class BloquearConta
-    class SolicitarNovaConfirmacao
 
     Pedido "1" *-- "1..*" ItemPedido : composição
     ItemPedido --> Categoria
     Pedido --> Cliente
-    Cliente --> StatusCliente
+    Pedido --> StatusPedido
+    RegraConjuncao --> StatusPedido : escopo
     EventoAntifraude <|-- EventoSimples
     EventoAntifraude <|-- EventoComplexo
     EventoComplexo <|-- EventoDeAusencia
     EventoDeAusencia --> JanelaDeCorrelacao
     AgendadorDeJanela --> JanelaDeCorrelacao : monitora
     RegraAusencia --> AgendadorDeJanela : assina expiração
+    RegraJanelaDeslizante --> AgendadorDeJanela : abre e assina a mesma janela
     EventoComplexo --> RegraDeCorrelacao
     EventoComplexo "1" o-- "0..*" EventoSimples : agregação, correlaciona
     EventoComplexo --> AcaoAntifraude : dispara
     RegraDeCorrelacao <|.. RegraConjuncao
     RegraDeCorrelacao <|.. RegraJanelaDeslizante
     RegraDeCorrelacao <|.. RegraContagem
-    RegraDeCorrelacao <|.. RegraCrossEntity
     RegraDeCorrelacao <|.. RegraAusencia
     AcaoAntifraude <|.. CobrancaCentavos
     AcaoAntifraude <|.. ScanFacial
     AcaoAntifraude <|.. NegarPedido
     AcaoAntifraude <|.. BloquearConta
-    AcaoAntifraude <|.. SolicitarNovaConfirmacao
 ```
 
-`RegraConjuncao` implementa [E13](#e13), `RegraJanelaDeslizante` implementa [E14](#e14), `RegraContagem` implementa [E15](#e15)/[E16](#e16)/[E17](#e17) (uma instância por evento, mesmo mecanismo), `RegraCrossEntity` implementa [E18](#e18), `RegraAusencia` implementa [E19](#e19) e é a única que produz um `EventoDeAusencia` em vez de um `EventoComplexo` comum.
+`RegraConjuncao` implementa [E13](#e13), `RegraJanelaDeslizante` implementa [E14](#e14), `RegraContagem` implementa [E15](#e15), `RegraAusencia` implementa [E19](#e19) e é a única que produz um `EventoDeAusencia` em vez de um `EventoComplexo` comum, disparada só pelo `AgendadorDeJanela`, sem depender de nenhum evento simples de origem. `avaliar(eventos)` é chamado por ela com lista vazia, no callback de `aoExpirar`, a assinatura genérica da interface cobre esse caso sem precisar de método próprio. `RegraJanelaDeslizante` e `RegraAusencia` assinam o **mesmo** `AgendadorDeJanela`/`JanelaDeCorrelacao` (ver diagrama 5): a janela é aberta uma única vez esperando [E09](#e09), e o resultado bifurca conforme o sinal chega ([E14](#e14)) ou a janela expira antes ([E19](#e19)) — não são dois mecanismos de janela independentes.
+
+`StatusPedido` é modelado como enum explícito porque é usado por dois lugares (`Pedido.status` e o escopo de `RegraConjuncao`), igual `Categoria`: os valores batem 1:1 com os estados do diagrama 3. `Cliente` não carrega mais um `status` próprio: nenhum diagrama dinâmico movimenta esse campo, `BloquearConta` (cenário [C4](#c4)) já é a ação concreta que cobre o bloqueio, sem precisar de um enum de estado do cliente que nunca é lido nem escrito em nenhuma sequência.
 
 #### Diagrama 2: diagrama de arquitetura de streaming
 
-Este é um diagrama de arquitetura/fluxo (não um diagrama de componentes UML formal, sem estereótipo `<<component>>` nem notação de interface lollipop/socket), a escolha aqui é mostrar o roteamento real de tópico por evento, que é o que a tabela 1 precisa provar que sustenta.
+Este é um diagrama de arquitetura/fluxo (não um diagrama de componentes UML formal, sem estereótipo `<<component>>` nem notação de interface lollipop/socket), a escolha aqui é mostrar o roteamento real de tópico por evento, que é o que a tabela 1 precisa provar que sustenta. Ele é complementar, não a base da exigência de modelagem estática UML: essa exigência já é cumprida pelo diagrama 1 (diagrama de classes, UML formal). Isso deixa a modelagem estática deste documento com 1 diagrama UML formal + 1 diagrama de arquitetura não-UML, contra 4 diagramas dinâmicos, todos UML formal (diagramas 3, 4, 5 e 6). Só entram aqui os tópicos que alimentam alguma correlação de CEP ([E01](#e01), [E02](#e02), [E03](#e03), [E04](#e04), [E09](#e09), [E10](#e10)) — [E06](#e06) e [E08](#e08) são eventos simples de negócio já cobertos pela tabela 1, mas não participam de nenhuma `RegraDeCorrelacao`, então não têm papel a provar neste diagrama.
 
-Cada serviço de origem é um producer que publica num tópico Kafka próprio por tipo de evento, com a chave de partição natural indicada em cada tópico. Duas correlações não batem com a chave natural do tópico de origem, e precisam de repartição (`selectKey`) explícita antes do processador de correlação:
+Cada serviço de origem é um producer que publica num tópico Kafka próprio por tipo de evento, com a chave de partição natural indicada em cada tópico. [E14](#e14) correlaciona por `clienteId`, mas `cart-value-updated` e `address-check` nascem chaveados por `orderId` (um cliente pode ter feito o pedido em sessões diferentes), então passam por `RK1` (repartição via `selectKey`) antes de chegar no processador.
 
-- [E14](#e14) correlaciona por `clienteId`, mas `cart-value-updated` e `address-check` nascem chaveados por `orderId` (um cliente pode ter feito o pedido em sessões diferentes), então passam por `RK1` antes de chegar no processador.
-- [E18](#e18) correlaciona pelo valor do fingerprint/endereço em si, então passa por `RK2` até virar a `GlobalKTable` compartilhada.
+[E15](#e15) correlaciona dentro do **mesmo `orderId`** (múltiplas tentativas de pagamento no mesmo pedido antes dele fechar), que já é a chave natural de `payment-attempt`/`gateway-failure`, então não precisa de repartição nenhuma.
 
-[E15](#e15), ao contrário do que uma versão anterior deste documento afirmava, foi reescopado pra correlacionar dentro do **mesmo `orderId`** (múltiplas tentativas de pagamento no mesmo pedido antes dele fechar), que já é a chave natural de `payment-attempt`/`gateway-failure`, então não precisa de repartição nenhuma.
+[E19](#e19) não consome nenhum tópico: ele é puramente o timeout do `AgendadorDeJanela` que monitora a janela aberta por `P14` (ver diagrama 1). Isso é o que garante que E19 seja ausência de verdade, dispara mesmo se o Device Fingerprinting cair de vez e não publicar nada, não uma reação a um evento de erro específico.
 
 ```mermaid
 flowchart LR
@@ -190,58 +188,38 @@ flowchart LR
         A1[Checkout Service]
         A2[Payment Gateway]
         A3[Device Fingerprinting]
-        A4[Biometria Service]
     end
 
-    subgraph Topicos["Kafka: chave de partição natural indicada em cada tópico"]
+    subgraph Topicos["Kafka: chave de partição natural indicada em cada tópico — só tópicos que alimentam correlação"]
         T1[(cart-item-added, E01, chave=orderId)]
         T2[(cart-value-updated, E02, chave=orderId)]
         T3[(address-check, E03, chave=orderId)]
         T4[(payment-attempt, E04, chave=orderId)]
-        T5[(payment-confirmation, E06, chave=sessionId)]
         T6[(device-fingerprint, E09, chave=clienteId)]
-        T7[(biometric-result, E08, chave=sessionId)]
         T8[(gateway-failure, E10, chave=orderId)]
-        T9[(biometria-failure, E11, chave=sessionId)]
-        T10[(fingerprint-latency, E12, chave=clienteId)]
     end
 
     RK1[Repartição: selectKey por clienteId]
-    RK2[Repartição: selectKey por fingerprint/endereço]
-    IDXTOPIC[(identity-index-topic, compactado, chave=fingerprint/endereço)]
-    IDX[("identity-index, GlobalKTable")]
 
-    subgraph CEPSingle["Motor de CEP: correlação single-entity"]
+    subgraph CEPSingle["Motor de CEP"]
         P13[RegraConjuncao -> E13]
         P14[RegraJanelaDeslizante -> E14]
-        P19[RegraAusencia -> E19]
+        P19[RegraAusencia -> E19, timer]
         P15[RegraContagem -> E15]
-        P16[RegraContagem -> E16]
-        P17[RegraContagem -> E17]
-    end
-
-    subgraph CEPCross["Motor de CEP: correlação cross-entity"]
-        P18[RegraCrossEntity -> E18]
     end
 
     S1[(fraud-complex-events)]
 
-    subgraph Consumers["Consumers de decisão"]
+    subgraph Consumers["Consumer de decisão"]
         D1[Serviço de decisão]
-        D2[Notificação]
-        D3[Time de risco]
     end
 
     A1 --> T1
     A1 --> T2
     A1 --> T3
     A1 --> T4
-    A2 --> T5
     A2 --> T8
     A3 --> T6
-    A3 --> T10
-    A4 --> T7
-    A4 --> T9
 
     T1 --> P13
     T2 --> P13
@@ -249,58 +227,39 @@ flowchart LR
     T3 --> RK1
     T2 --> RK1
     RK1 --> P14
-    T10 --> P19
+    P14 -.->|monitora janela, timeout via AgendadorDeJanela| P19
     T4 --> P15
     T8 --> P15
-    T5 --> P16
-    T7 --> P17
-    T9 --> P17
-
-    T6 --> RK2
-    T3 --> RK2
-    RK2 --> IDXTOPIC
-    IDXTOPIC --> IDX
-    IDX --> P18
 
     P13 --> S1
     P14 --> S1
     P19 --> S1
     P15 --> S1
-    P16 --> S1
-    P17 --> S1
-    P18 --> S1
 
     S1 --> D1
-    S1 --> D2
-    S1 --> D3
 ```
 
 ### 2.2 Modelagem dinâmica
 
 #### Diagrama 3: diagrama de estados, ciclo de vida do pedido
 
-Representa como o pedido transita entre estados. Todos os rótulos de transição abaixo são eventos ou triggers nomeados, não números de cenário (o mapeamento pra cenário de negócio fica só no texto, não no diagrama, pra não misturar os dois vocabulários): `AvaliacaoConcluidaSemComplexo` corresponde ao caminho de aprovação direta, `SinalIsoladoDeRisco` corresponde ao cenário [C1](#c1) (nenhuma `RegraDeCorrelacao` disparou, só um sinal fraco isolado), `E13` leva a `AvaliandoHistorico` e corresponde ao [C3](#c3) (diagrama 4 detalha essa consulta), `E14`/`E19` correspondem ao [C2](#c2), `E15` ao [C4](#c4), `E16`/`E17` fecham [C5](#c5)/[C2](#c2). [E18](#e18) também aparece (indo pra `RevisaoManual`), evento real da tabela 1 com reação de sistema definida, mesmo sem virar cenário numerado da seção 3. Repetições que não mudam de estado (1º erro de confirmação, 1ª reprovação de biometria) ficam de fora do diagrama, só saem do estado pendente quando o evento complexo correspondente é gerado.
+Representa como o pedido transita entre estados. Todos os rótulos de transição abaixo são eventos ou triggers nomeados, não números de cenário (o mapeamento pra cenário de negócio fica só no texto, não no diagrama, pra não misturar os dois vocabulários). `E13`, `E14` e `E19` saem de `Criado`, não de `EmAnalise`: as sequências 4 e 5 mostram os três sendo avaliados enquanto o cliente ainda monta o carrinho, antes de qualquer tentativa de pagamento — colocar a transição em `EmAnalise` implicaria que só reagem depois de `E04`, o que contradiria as próprias sequências. `E13` leva a `AvaliandoHistorico` e corresponde ao [C3](#c3) (diagrama 4 detalha essa consulta), `E14`/`E19` correspondem ao [C2](#c2). O caminho de sinal isolado sem nenhuma correlação disparada (fallback padrão pra `PendenteCentavos`) existe no sistema mas fica fora deste diagrama, de propósito: não é produzido por nenhuma `RegraDeCorrelacao`, então não é um evento de CEP nem cenário numerado (ver seção 3), e modelar aqui só inflaria o diagrama sem provar nenhum dos 3 critérios da ponderada. `E15` só pode ocorrer depois de `EmAnalise`, porque depende de repetidas tentativas de `E04`, e corresponde ao [C4](#c4). A transição rotulada `E15, BloquearConta` deixa explícito que quem move o pedido pra `Negado` aqui é a execução de `BloquearConta` (não `NegarPedido` — são classes `AcaoAntifraude` distintas no diagrama 1): bloquear a conta do cliente também nega o pedido em aberto que originou a contagem, mas o cliente em si não ganha um status próprio no modelo estático, só o pedido é afetado. Nem confirmação de centavos errada nem biometria reprovada viram evento complexo ou bloqueio automático nesta versão (simplificação deliberada, nenhum cenário exige essa escalada): erro de confirmação é tratado como regra de negócio simples fora do escopo de CEP, e biometria reprovada cai no mesmo fallback de `PendenteCentavos`. Repetições que não mudam de estado ficam de fora do diagrama.
 
 ```mermaid
 stateDiagram-v2
     direction LR
     [*] --> Criado
+    Criado --> AvaliandoHistorico : E13
+    Criado --> PendenteBiometria : E14
+    Criado --> PendenteBiometria : E19
     Criado --> EmAnalise : E04
     EmAnalise --> Aprovado : AvaliacaoConcluidaSemComplexo
-    EmAnalise --> PendenteCentavos : SinalIsoladoDeRisco
-    EmAnalise --> AvaliandoHistorico : E13
-    EmAnalise --> PendenteBiometria : E14
-    EmAnalise --> PendenteBiometria : E19
-    EmAnalise --> Negado : E15
-    EmAnalise --> RevisaoManual : E18
+    EmAnalise --> Negado : E15, BloquearConta
     AvaliandoHistorico --> Aprovado : HistoricoCompativel
     AvaliandoHistorico --> Negado : HistoricoIncompativel
     PendenteCentavos --> Aprovado : E06Correto
-    PendenteCentavos --> Negado : E16
     PendenteBiometria --> Aprovado : E08Match
-    PendenteBiometria --> Negado : E17
-    RevisaoManual --> Negado : FraudeConfirmada
-    RevisaoManual --> Aprovado : FalsoPositivo
+    PendenteBiometria --> PendenteCentavos : E08NoMatch
     Aprovado --> [*]
     Negado --> [*]
 ```
@@ -330,15 +289,16 @@ sequenceDiagram
     Decisao->>Historico: consulta síncrona ao padrão de compra do cliente
     Historico-->>Decisao: histórico compatível ou não
     alt histórico compatível, cliente recorrente
-        Decisao->>Cliente: aprova pedido
+        Decisao->>Checkout: aprova pedido
     else histórico incompatível, cliente novo com esse padrão
-        Decisao->>Cliente: nega pedido
+        Decisao->>Checkout: nega pedido
     end
+    Checkout->>Cliente: comunica resultado
 ```
 
 #### Diagrama 5: diagrama de sequência, correlação multi-sinal, ausência de sinal e scan facial (cenário C2)
 
-Mostra três eventos simples de origens diferentes (dispositivo, endereço, valor) sendo correlacionados numa janela deslizante, resultando em [E14](#e14). Inclui o caminho alternativo em que o dispositivo não responde a tempo: o `AgendadorDeJanela` detecta a expiração, [E12](#e12) é publicado, e o motor gera [E19](#e19) (ausência de sinal) em vez de travar esperando, seguindo pro mesmo fallback conservador.
+Mostra três eventos simples de origens diferentes (dispositivo, endereço, valor) sendo correlacionados numa janela deslizante, resultando em [E14](#e14). Inclui o caminho alternativo em que o dispositivo não responde a tempo: o `AgendadorDeJanela` detecta a expiração por conta própria, sem depender de nenhum sinal do Device Fingerprinting, e o motor gera [E19](#e19) (ausência de sinal) em vez de travar esperando, seguindo pro mesmo fallback conservador.
 
 ```mermaid
 sequenceDiagram
@@ -348,6 +308,7 @@ sequenceDiagram
     participant Kafka
     participant CEP as Motor de CEP
     participant Agendador as Agendador de janela
+    participant Decisao as Serviço de decisão
     participant Biometria as Serviço de biometria
 
     Cliente->>Checkout: informa endereço diferente do histórico
@@ -361,25 +322,27 @@ sequenceDiagram
         Kafka->>CEP: consome E09
         CEP->>CEP: avalia conjunção com janela deslizante
         CEP->>Kafka: publica E14, possível conta comprometida
-    else janela expira sem E09
-        Device->>Kafka: publica E12, latência alta
+    else janela expira sem E09, dispositivo pode até ter travado por completo
         Agendador->>CEP: notifica expiração da janela
         CEP->>Kafka: publica E19, decisão sem sinal de dispositivo
     end
-    Kafka->>Checkout: consome E14 ou E19
-    Checkout->>Cliente: solicita scan facial, E07
+    Kafka->>Decisao: consome E14 ou E19
+    Decisao->>Checkout: solicita scan facial
+    Checkout->>Cliente: pede scan facial, E07
     Cliente->>Biometria: realiza scan
     Biometria->>Kafka: publica E08, resultado
+    Kafka->>Decisao: consome E08
     alt match
-        Checkout->>Cliente: aprova pedido
+        Decisao->>Checkout: aprova pedido
     else no-match
-        Checkout->>Cliente: pede novo scan, ou nega se virar E17
+        Decisao->>Checkout: fallback pra cobrança de centavos
     end
+    Checkout->>Cliente: comunica resultado
 ```
 
 #### Diagrama 6: diagrama de sequência, padrão de teste de cartão até bloqueio (cenário C4)
 
-Mostra uma sequência de tentativas de pagamento pequenas e rápidas sendo contadas pelo motor de CEP até ultrapassar o limite, gerando [E15](#e15) e o bloqueio preventivo da conta. Uma falha de gateway ([E10](#e10)) no meio da sequência é descontada da contagem. Cada tentativa carrega um `eventoId` idempotente: se o producer reenviar a mesma tentativa (garantia at-least-once do Kafka), o processador de contagem reconhece o `eventoId` repetido e não conta duas vezes.
+Mostra uma sequência de tentativas de pagamento pequenas e rápidas sendo contadas pelo motor de CEP até ultrapassar o limite, gerando [E15](#e15) e o bloqueio preventivo da conta. Uma falha de gateway ([E10](#e10)) no meio da sequência é descontada da contagem. Cada tentativa carrega um `eventoId` idempotente: Kafka garante entrega at-least-once por padrão, então se o producer reenviar a mesma tentativa, o processador de contagem reconhece o `eventoId` repetido e não conta duas vezes — pelo mesmo motivo, um atraso de rede que chega depois do grace period da janela de [E14](#e14) (diagrama 5) cai no caminho de [E19](#e19): ausência, não erro.
 
 ```mermaid
 sequenceDiagram
@@ -408,13 +371,7 @@ sequenceDiagram
 
 **Event Sourcing, com a ressalva certa**: os tópicos de evento (`cart-item-added`, `device-fingerprint`, `fraud-complex-events` etc) são um log append-only, útil pra auditoria (reconstruir "o que aconteceu com esse pedido" replayando o stream daquele `orderId`). Isso não é Event Sourcing pleno enquanto `Pedido.status` (diagrama 1) continua sendo um campo mutável escrito diretamente pelos serviços de decisão: Event Sourcing de verdade exigiria que `status` fosse uma projeção, recalculada aplicando uma função de fold sobre o log de eventos daquele `orderId`, nunca escrita direto. Com a arquitetura atual, o que existe é log de auditoria com potencial de virar Event Sourcing pleno, não é a mesma coisa, e o documento não afirma mais que é.
 
-**CQRS, separando o exemplo bom do frágil**: o `identity-index` (diagrama 2) é CQRS de verdade, um read model (`GlobalKTable`) materializado a partir do próprio stream de escrita (`device-fingerprint`/`address-check` repartidos), consultado pela correlação cross-entity sem tocar o lado de escrita. Já o "histórico de compra do cliente" (diagrama 4) não é exemplo de CQRS desta arquitetura: nada aqui mostra esse histórico sendo alimentado pelo stream de antifraude, ele vive no sistema de gestão de pedidos e é consultado de forma síncrona, como uma integração externa, não como o lado de leitura do mesmo pipeline. Deixei isso marcado no texto do diagrama 4.
-
-### 2.4 Semântica de entrega e janelas
-
-Kafka garante at-least-once por padrão: o mesmo evento pode chegar duplicado ao consumer (retry de producer, rebalance de partição). Os operadores de contagem ([E15](#e15), [E16](#e16), [E17](#e17)) usam o `eventoId` de `EventoAntifraude` como chave de deduplicação, sem isso um reenvio de [E04](#e04) contaria duas vezes no threshold de [E15](#e15) e dispararia bloqueio indevido.
-
-Janelas baseadas em tempo ([E14](#e14), [E19](#e19)) usam o timestamp do evento, não o de processamento, e um grace period (terminologia de Kafka Streams, que é o motor assumido nesta arquitetura pela `GlobalKTable`/`selectKey` já usados; watermark é terminologia de Flink, não se aplica aqui): um evento que chega depois do grace period (atraso de rede/fila) é tratado como tarde demais pra aquela janela, mesmo que o dado exista, cai no mesmo caminho de [E19](#e19) (ausência), que é justamente o motivo de [E19](#e19) existir como padrão formal em vez de exceção não tratada.
+**CQRS, com escopo honesto**: o lado de escrita é a ingestão via Kafka e os processadores de correlação (`P13`, `P14`, `P15`, `P19`), otimizado pra throughput, nunca consultado diretamente pelo Checkout. O lado de leitura é o consumer de decisão (`Serviço de decisão`, diagrama 2), que reage ao mesmo stream sem escrever nele. Esta versão do documento não materializa um read model dedicado (um índice cross-entity chegou a ser modelado numa revisão anterior e foi cortado por não ter cenário de negócio próprio), então o que sustenta CQRS aqui é a separação escrita/leitura em si, não uma estrutura de dados própria. O "histórico de compra do cliente" (diagrama 4) não conta como exemplo: vive no sistema de gestão de pedidos e é consultado de forma síncrona, integração externa, não o lado de leitura deste pipeline.
 
 ## 3. Cenários de negócio
 
@@ -423,16 +380,25 @@ Janelas baseadas em tempo ([E14](#e14), [E19](#e19)) usam o timestamp do evento,
 | Critério | O que exige |
 |---|---|
 | Ancorado num evento real da tabela 1 | O evento de entrada é um ID específico ([E01](#e01) a [E19](#e19)) ou a ausência explícita de um evento complexo, nunca uma situação hipotética solta |
-| Ação mapeada numa classe concreta | A ação disparada corresponde a uma das implementações de `AcaoAntifraude` do diagrama 1 (`CobrancaCentavos`, `ScanFacial`, `NegarPedido`, `BloquearConta`, `SolicitarNovaConfirmacao`), não uma descrição vaga nova |
+| Ação mapeada numa classe concreta | A ação disparada corresponde a uma das implementações de `AcaoAntifraude` do diagrama 1 (`CobrancaCentavos`, `ScanFacial`, `NegarPedido`, `BloquearConta`), não uma descrição vaga nova |
 | Ganho sobre a transação, não sobre detecção em geral | O benefício declarado precisa ser sobre a transação em si (menos fricção, decisão mais rápida, bloqueio antes da perda), e não um argumento genérico de "detecta mais fraude" |
-| Mecanismo de correlação real por trás | O evento de entrada é gerado por uma `RegraDeCorrelacao` de verdade (ou pela ausência de qualquer uma), não uma validação simples disfarçada de CEP. Dois cenários podem usar o mesmo tipo de regra (ex: `RegraContagem`) quando o evento simples de origem e o contexto de negócio são realmente diferentes, cobrir cada mecanismo distinto da tabela 1 pelo menos uma vez importa mais do que nenhum cenário repetir tipo de regra |
+| Mecanismo de correlação real por trás | O evento de entrada é gerado por uma `RegraDeCorrelacao` de verdade (ou pela ausência de qualquer uma), não uma validação simples disfarçada de CEP |
 
-[E18](#e18) e [E19](#e19) têm reação de sistema definida (diagramas 2 e 3), mas não viraram um dos 5 cenários abaixo, a ponderada pede 3 no mínimo. Os 5 cenários juntos já passam por `RegraConjuncao` ([C3](#c3)), `RegraJanelaDeslizante` ([C2](#c2)) e `RegraContagem` ([C4](#c4) e [C5](#c5), mesmo tipo de regra, eventos de origem diferentes: tentativa de pagamento vs erro de confirmação). [C1](#c1) é um caso à parte: não é implementado por nenhuma `RegraDeCorrelacao`, é o caminho em que nenhuma regra disparou, um sinal fraco isolado que não completou nenhum padrão de correlação, por isso a ação dele é mais leve que a dos outros 4.
+[E19](#e19) tem reação de sistema definida (diagrama 3), mas não virou um dos 3 cenários abaixo — a ponderada pede 3 no mínimo, e os 3 já passam por `RegraJanelaDeslizante` ([C2](#c2)), `RegraConjuncao` ([C3](#c3)) e `RegraContagem` ([C4](#c4)), sem repetir tipo de regra. O caminho de sinal isolado sem correlação (fallback padrão pra `CobrancaCentavos`) continua existindo no sistema, mas não virou cenário numerado nem entrou no diagrama 3: não é implementado por nenhuma `RegraDeCorrelacao`, então não atende o critério "mecanismo de correlação real por trás" da tabela acima.
 
 | ID | Cenário | Evento(s) de entrada | Ação disparada | Ganho de eficiência |
 |---|---|---|---|---|
-| <a id="c1"></a>C1 | Cobrança de centavos quando nenhuma regra de correlação dispara | 1 sinal de risco isolado (ex: [E03](#e03), sem outros sinais na janela, nenhum `EventoComplexo` gerado) | `CobrancaCentavos` (resultado: [E05](#e05)) | Evita negar venda legítima por 1 sinal fraco, resolve a ambiguidade com fricção mínima |
-| <a id="c2"></a>C2 | Scan facial só com correlação multi-sinal | [E14](#e14) | `ScanFacial` (resultado: [E07](#e07)) | Biometria só é exigida quando 3 sinais convergem, reduz atrito no checkout da maioria dos pedidos, que não geram [E14](#e14) |
-| <a id="c3"></a>C3 | Negação de combo suspeito com exceção por histórico do próprio cliente | [E13](#e13) correlacionado com histórico de compra do mesmo cliente | Negar pedido, ou liberar se o padrão já é recorrente pra esse cliente | Reduz falso positivo em cliente recorrente (ex: churrasco de família), mantendo o bloqueio pra cliente novo com o mesmo padrão |
+| <a id="c2"></a>C2 | Scan facial só com correlação multi-sinal | [E14](#e14) ou [E19](#e19) | `ScanFacial` (resultado: [E07](#e07)) | Biometria só é exigida quando os sinais convergem (ou o sinal de dispositivo está ausente), reduz atrito no checkout da maioria dos pedidos, que não geram nenhum dos dois |
+| <a id="c3"></a>C3 | Negação de combo suspeito com exceção por histórico do próprio cliente | [E13](#e13) correlacionado com histórico de compra do mesmo cliente | `NegarPedido` no ramo incompatível; no ramo compatível não há `AcaoAntifraude` nenhuma, é o fluxo padrão de aprovação (ver nota) | Reduz falso positivo em cliente recorrente (ex: churrasco de família), mantendo o bloqueio pra cliente novo com o mesmo padrão |
 | <a id="c4"></a>C4 | Bloqueio preventivo por teste de cartão | [E15](#e15) | Bloquear conta | Detecção em tempo real corta a fraude na 3ª/4ª tentativa, antes do cartão testado ser usado numa compra de valor alto |
-| <a id="c5"></a>C5 | Escalonamento progressivo por confirmação inconsistente | [E06](#e06) repetido, virando [E16](#e16) | 1º erro: `SolicitarNovaConfirmacao`. 2º erro ([E16](#e16)): `NegarPedido` (mesma transição determinística do diagrama 3, `PendenteCentavos --> Negado`) | Erro isolado de digitação não penaliza cliente legítimo, só o padrão repetido eleva a ação |
+
+## 4. Limitações conhecidas fora do escopo dos 3 critérios
+
+Os itens abaixo não são cobrados pelos 3 critérios da ponderada nem mudam nenhum evento/diagrama/cenário acima — ficam registrados pra deixar claro que são simplificação deliberada, não lacuna não percebida:
+
+- **Sem schema registry nem versionamento de evento**: os tópicos Kafka do diagrama 2 assumem payload estável. Em produção, mudar o formato de um evento (ex: adicionar campo em `E02`) sem contrato versionado quebra consumer antigo silenciosamente.
+- **Sem dead-letter topic**: evento malformado ou que falha repetido na deserialização não tem rota de escape modelada; na prática pararia o processador de correlação daquele tópico.
+- **TTL de partial match (`E13`) não é a mesma coisa que watermark**: o motor real de CEP (Esper, Flink CEP) trata evento fora de ordem via watermark explícito sobre o tempo de evento; aqui o TTL amarrado ao timeout de carrinho abandonado resolve o caso de uso, mas é um mecanismo mais simples, não um watermark de propósito geral.
+- **`device-fingerprint` (E09) chaveado por `clienteId`** pressupõe cliente já identificado no momento da captura do fingerprint. Fluxo real de fraude costuma capturar esse sinal por sessão/dispositivo anônimo e correlacionar com `clienteId` só depois do login — o diagrama 2 simplifica isso pra não introduzir mais uma etapa de repartição.
+
+Nota sobre [C3](#c3): dos 3 cenários, é o único onde nem toda ação do fluxo mapeia numa classe `AcaoAntifraude` — aprovar não é uma ação de antifraude no diagrama 1, é ausência de ação (o pedido segue seu curso normal sem intervenção do motor). O critério "ação mapeada numa classe concreta" da tabela acima vale só pra ação de fraude disparada, não pro caminho de aprovação, que por definição não precisa de uma classe própria.
